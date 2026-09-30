@@ -51,8 +51,6 @@ jobs:
     env:
       T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      ELECTRON_CACHE: ${{ runner.temp }}/electron-cache
-      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -67,6 +65,8 @@ jobs:
         shell: pwsh
         run: |
           corepack enable
+          "ELECTRON_CACHE=$env:RUNNER_TEMP/electron-cache" >> $env:GITHUB_ENV
+          "ELECTRON_BUILDER_CACHE=$env:RUNNER_TEMP/electron-builder-cache" >> $env:GITHUB_ENV
           "node=$(node --version)" >> $env:GITHUB_OUTPUT
           "pnpm=$(pnpm --version)" >> $env:GITHUB_OUTPUT
           "store=$(pnpm store path)" >> $env:GITHUB_OUTPUT
