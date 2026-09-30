@@ -2,7 +2,7 @@ name: Windows stable releases
 
 on:
   schedule:
-    - cron: "11 * * * *"
+    - cron: "43 * * * *"
   workflow_dispatch:
     inputs:
       validate_only:
