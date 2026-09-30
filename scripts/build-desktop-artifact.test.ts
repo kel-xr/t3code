@@ -1980,6 +1980,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       const win = config.win as Record<string, unknown>;
+      assert.equal(win.executableName, "t3code-kelxr");
       assert.equal(win.icon, "icon.ico");
       assert.equal(win.signAndEditExecutable, true);
       assert.notProperty(win, "azureSignOptions");

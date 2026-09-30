@@ -78,7 +78,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Pop-Location
           Push-Location apps/desktop
-          pnpm exec vp test run src/updates/ src/electron/ElectronUpdater.test.ts
+          pnpm exec vp test run src/updates/ src/electron/ElectronUpdater.test.ts src/app/DesktopEnvironment.test.ts
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Pop-Location
       - name: Typecheck changed packages
