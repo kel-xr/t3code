@@ -181,6 +181,8 @@ export interface CodexSessionRuntimeOptions {
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
+  /** KelXR: per-thread `model_auto_compact_token_limit`, fixed when the thread opens or resumes. */
+  readonly autoCompactTokenLimit?: number | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
   /** The provider's model list; supplies the display name for runtime info. */
@@ -538,6 +540,12 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
         sandbox: "workspace-write",
         approvalsReviewer: "auto_review",
       };
+    case "codex-auto-full-access":
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "danger-full-access",
+        approvalsReviewer: "auto_review",
+      };
     case "full-access":
     default:
       return {
@@ -553,6 +561,7 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly autoCompactTokenLimit?: number | undefined;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
@@ -562,6 +571,9 @@ function buildThreadStartParams(input: {
     approvalsReviewer: config.approvalsReviewer,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(input.autoCompactTokenLimit
+      ? { config: { model_auto_compact_token_limit: input.autoCompactTokenLimit } }
+      : {}),
   };
 }
 
@@ -578,6 +590,7 @@ function runtimeModeToTurnSandboxPolicy(
       return {
         type: "workspaceWrite",
       };
+    case "codex-auto-full-access":
     case "full-access":
     default:
       return {
@@ -739,6 +752,7 @@ export const openCodexThread = (input: {
   readonly cwd: string;
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly autoCompactTokenLimit?: number | undefined;
   readonly resumeThreadId: string | undefined;
 }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
@@ -747,6 +761,7 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    autoCompactTokenLimit: input.autoCompactTokenLimit,
   });
 
   if (resumeThreadId === undefined) {
@@ -2492,6 +2507,7 @@ export const makeCodexSessionRuntime = (
         cwd: options.cwd,
         requestedModel,
         serviceTier: options.serviceTier,
+        autoCompactTokenLimit: options.autoCompactTokenLimit,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
       });
 

@@ -29,7 +29,14 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type {
+  AssistantMessage,
+  OpencodeClient,
+  Part,
+  PermissionRequest,
+  QuestionRequest,
+} from "@opencode-ai/sdk/v2";
+import { readKelxrCompactionTokenLimit } from "@t3tools/shared/kelxrCompactionPolicy";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -258,6 +265,13 @@ interface OpenCodePendingRequestRecovery {
   rerun: boolean;
 }
 
+/** KelXR: context size of one assistant step, as OpenCode measured it. */
+export function openCodeAssistantContextTokens(info: Pick<AssistantMessage, "tokens">): number {
+  const { tokens } = info;
+  const measured = tokens.input + tokens.cache.read + tokens.output + tokens.reasoning;
+  return Math.max(tokens.total ?? 0, measured);
+}
+
 function trimText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
@@ -365,6 +379,13 @@ interface OpenCodeSessionContext {
   pendingRequestRecovery: OpenCodePendingRequestRecovery | undefined;
   promptGeneration: number;
   promptAdmission: OpenCodePromptAdmission | undefined;
+  /** KelXR: per-thread compaction threshold and the usage it is compared against. */
+  compactionTokenLimit: number | null;
+  lastObservedContextTokens: number;
+  lastAssistantCompactionModel:
+    | { readonly providerID: string; readonly modelID: string }
+    | undefined;
+  compactionPending: boolean;
   readonly commandFibers: Set<Fiber.Fiber<void, ProviderAdapterRequestError>>;
   readonly promptSemaphore: Semaphore.Semaphore;
   readonly firstConnection: Deferred.Deferred<void, ProviderAdapterRequestError>;
@@ -1098,6 +1119,54 @@ export function makeOpenCodeAdapter(
         readonly event: Record<string, unknown>;
       },
     ) => writeNativeEvent(threadId, event).pipe(Effect.ignoreCause);
+
+    // KelXR: OpenCode has no configurable auto-compaction threshold, so T3 summarizes the session
+    // before the next prompt once the last measured context reached the thread's threshold.
+    const compactOpenCodeSessionIfNeeded = Effect.fn("compactOpenCodeSessionIfNeeded")(function* (
+      context: OpenCodeSessionContext,
+    ) {
+      const threshold = context.compactionTokenLimit;
+      const model = context.lastAssistantCompactionModel;
+      if (
+        !context.compactionPending ||
+        threshold === null ||
+        context.lastObservedContextTokens < threshold ||
+        model === undefined
+      ) {
+        return true;
+      }
+
+      context.compactionPending = false;
+      const result = yield* runOpenCodeSdk("session.summarize", (signal) =>
+        context.client.session.summarize(
+          {
+            sessionID: context.openCodeSessionId,
+            providerID: model.providerID,
+            modelID: model.modelID,
+            auto: true,
+          },
+          { signal },
+        ),
+      ).pipe(Effect.result);
+
+      if (result._tag === "Failure" || result.success.data !== true) {
+        context.compactionPending = true;
+        yield* emit({
+          ...(yield* buildEventBase({ threadId: context.session.threadId })),
+          type: "runtime.warning",
+          payload: {
+            message: "OpenCode threshold compaction could not run.",
+            detail:
+              result._tag === "Failure"
+                ? openCodeRuntimeErrorDetail(result.failure)
+                : "The provider did not confirm compaction.",
+          },
+        });
+        return false;
+      }
+
+      return true;
+    });
 
     const cancelIdleReconciliation = Effect.fn("cancelIdleReconciliation")(function* (
       context: OpenCodeSessionContext,
@@ -2312,6 +2381,8 @@ export function makeOpenCodeAdapter(
           break;
         }
         case "session.compacted": {
+          context.lastObservedContextTokens = 0;
+          context.compactionPending = false;
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
@@ -2352,6 +2423,49 @@ export function makeOpenCodeAdapter(
             context.textPartsByMessageId.delete(event.properties.info.id);
           }
           if (event.properties.info.role === "assistant") {
+            // KelXR: live context usage. OpenCode opens each step with zeroed tokens before it
+            // reports the measured ones, so only measured values replace the last observation.
+            const info = event.properties.info;
+            const usedTokens = info.tokens ? openCodeAssistantContextTokens(info) : 0;
+            if (usedTokens > 0) {
+              context.lastObservedContextTokens = usedTokens;
+              if (info.providerID && info.modelID) {
+                context.lastAssistantCompactionModel = {
+                  providerID: info.providerID,
+                  modelID: info.modelID,
+                };
+              }
+              context.compactionPending =
+                info.time?.completed !== undefined &&
+                context.compactionTokenLimit !== null &&
+                usedTokens >= context.compactionTokenLimit;
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  raw: event,
+                })),
+                type: "thread.token-usage.updated",
+                payload: {
+                  usage: {
+                    usedTokens,
+                    inputTokens: info.tokens.input,
+                    cachedInputTokens: info.tokens.cache.read,
+                    outputTokens: info.tokens.output,
+                    reasoningOutputTokens: info.tokens.reasoning,
+                    lastUsedTokens: usedTokens,
+                    lastInputTokens: info.tokens.input,
+                    lastCachedInputTokens: info.tokens.cache.read,
+                    lastOutputTokens: info.tokens.output,
+                    lastReasoningOutputTokens: info.tokens.reasoning,
+                    compactsAutomatically: context.compactionTokenLimit !== null,
+                    ...(context.compactionTokenLimit === null
+                      ? {}
+                      : { autoCompactThreshold: context.compactionTokenLimit }),
+                  },
+                },
+              });
+            }
             const usage = context.turnTokenUsage;
             const parentMessageId =
               typeof event.properties.info.parentID === "string" &&
@@ -3030,6 +3144,10 @@ export function makeOpenCodeAdapter(
           pendingRequestRecovery: undefined,
           promptGeneration: 0,
           promptAdmission: undefined,
+          compactionTokenLimit: readKelxrCompactionTokenLimit(input.modelSelection),
+          lastObservedContextTokens: 0,
+          lastAssistantCompactionModel: undefined,
+          compactionPending: false,
           commandFibers: new Set(),
           promptSemaphore: Semaphore.makeUnsafe(1),
           firstConnection: Deferred.makeUnsafe<void, ProviderAdapterRequestError>(),
@@ -3108,6 +3226,10 @@ export function makeOpenCodeAdapter(
           issue: `OpenCode model selection is bound to instance '${modelSelection?.instanceId}', expected '${boundInstanceId}'.`,
         });
       }
+      context.compactionTokenLimit = readKelxrCompactionTokenLimit(modelSelection);
+      context.compactionPending =
+        context.compactionTokenLimit !== null &&
+        context.lastObservedContextTokens >= context.compactionTokenLimit;
       const parsedModel = parseOpenCodeModelSlug(modelSelection?.model);
       if (!parsedModel) {
         return yield* new ProviderAdapterValidationError({
@@ -3161,6 +3283,16 @@ export function makeOpenCodeAdapter(
           }
           if (sessions.get(input.threadId) !== context || (yield* Ref.get(context.stopped))) {
             return yield* Effect.interrupt;
+          }
+          if (
+            context.activeTurnId === undefined &&
+            !(yield* compactOpenCodeSessionIfNeeded(context))
+          ) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "La compactación no terminó. El mensaje pendiente no se envió.",
+            });
           }
           // A sendTurn while a turn is active is a steer. OpenCode queues the
           // prompt into the running session, so the active turn id is reused.

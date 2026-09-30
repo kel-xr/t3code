@@ -356,6 +356,33 @@ describe("buildTurnStartParams", () => {
     }),
   );
 
+  it.effect(
+    "routes approvals to the auto reviewer with unrestricted access in Approve for me",
+    () =>
+      Effect.gen(function* () {
+        const params = yield* buildTurnStartParams({
+          threadId: "provider-thread-1",
+          runtimeMode: "codex-auto-full-access",
+          prompt: "Ship it",
+        });
+
+        NodeAssert.deepStrictEqual(params, {
+          threadId: "provider-thread-1",
+          approvalPolicy: "on-request",
+          approvalsReviewer: "auto_review",
+          sandboxPolicy: {
+            type: "dangerFullAccess",
+          },
+          input: [
+            {
+              type: "text",
+              text: "Ship it",
+            },
+          ],
+        });
+      }),
+  );
+
   it("omits collaboration mode when interaction mode is absent", () => {
     const params = Effect.runSync(
       buildTurnStartParams({
@@ -901,6 +928,44 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("fixes the thread's auto-compaction threshold on start and on resume", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const client = {
+        request: (method: "thread/start", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
+        },
+        raw: {
+          request: (method: string, payload: unknown) => {
+            calls.push({ method, payload });
+            return Effect.succeed(makeThreadOpenResponse("saved-thread"));
+          },
+        },
+      } as unknown as Parameters<typeof openCodexThread>[0]["client"];
+      for (const resumeThreadId of [undefined, "saved-thread"]) {
+        yield* openCodexThread({
+          client,
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/project",
+          requestedModel: "gpt-5.3-codex",
+          serviceTier: undefined,
+          autoCompactTokenLimit: 280_000,
+          resumeThreadId,
+        });
+      }
+
+      NodeAssert.deepStrictEqual(
+        calls.map(({ method, payload }) => [method, (payload as { config?: unknown }).config]),
+        [
+          ["thread/start", { model_auto_compact_token_limit: 280_000 }],
+          ["thread/resume", { model_auto_compact_token_limit: 280_000 }],
+        ],
+      );
+    }),
+  );
+
   it.effect("resumes metadata when historical turns contain unknown error values", () =>
     Effect.gen(function* () {
       const response = makeThreadOpenResponse("saved-thread");

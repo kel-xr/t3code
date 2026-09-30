@@ -129,10 +129,19 @@ export const RuntimeMode = Schema.Literals([
   "approval-required",
   "auto-accept-edits",
   "auto",
+  "codex-auto-full-access",
   "full-access",
 ]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+
+/** KelXR: Codex-only mode; other providers treat it as a mode that still asks. */
+export function isRuntimeModeAvailableForProvider(
+  runtimeMode: RuntimeMode,
+  providerDriver: string,
+): boolean {
+  return runtimeMode !== "codex-auto-full-access" || providerDriver === "codex";
+}
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";

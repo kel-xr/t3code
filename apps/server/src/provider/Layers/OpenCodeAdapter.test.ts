@@ -48,6 +48,7 @@ import {
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
   mergeOpenCodeAssistantText,
+  openCodeAssistantContextTokens,
 } from "./OpenCodeAdapter.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
@@ -8013,4 +8014,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+});
+
+it("measures OpenCode context from its total, never below the reported parts", () => {
+  const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 0 } };
+  NodeAssert.equal(openCodeAssistantContextTokens({ tokens: { ...tokens, total: 200 } }), 200);
+  NodeAssert.equal(openCodeAssistantContextTokens({ tokens: { ...tokens, total: 0 } }), 155);
 });

@@ -95,6 +95,7 @@ export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
     case "auto-accept-edits":
       return "auto_edit";
     case "auto":
+    case "codex-auto-full-access":
     case "approval-required":
       return "default";
   }

@@ -46,6 +46,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { readKelxrCompactionTokenLimit } from "@t3tools/shared/kelxrCompactionPolicy";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
@@ -2302,6 +2303,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           !resolved && input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const autoCompactTokenLimit =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? readKelxrCompactionTokenLimit(input.modelSelection)
+            : null;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
@@ -2320,6 +2325,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
+          ...(autoCompactTokenLimit !== null ? { autoCompactTokenLimit } : {}),
           ...(mcpSession
             ? {
                 environment: {

@@ -1,4 +1,4 @@
-import type { RuntimeMode } from "@t3tools/contracts";
+import { isRuntimeModeAvailableForProvider, type RuntimeMode } from "@t3tools/contracts";
 import { type LucideIcon, LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon } from "lucide-react";
 
 export const runtimeModeConfig: Record<
@@ -20,6 +20,11 @@ export const runtimeModeConfig: Record<
     description: "Supported providers approve routine actions; others still ask.",
     icon: SparklesIcon,
   },
+  "codex-auto-full-access": {
+    label: "Approve for me",
+    description: "Codex auto-reviews sensitive actions with unrestricted system access.",
+    icon: SparklesIcon,
+  },
   "full-access": {
     label: "Full access",
     description: "Allow commands and edits without prompts.",
@@ -28,3 +33,10 @@ export const runtimeModeConfig: Record<
 };
 
 export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+
+/** Modes the composer offers for one provider (KelXR: "Approve for me" is Codex-only). */
+export function runtimeModeOptionsForProvider(providerDriver: string): RuntimeMode[] {
+  return runtimeModeOptions.filter((mode) =>
+    isRuntimeModeAvailableForProvider(mode, providerDriver),
+  );
+}

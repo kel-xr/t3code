@@ -1,7 +1,7 @@
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
-import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
+import { runtimeModeConfig, runtimeModeOptionsForProvider } from "./runtimeModeConfig";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -982,6 +982,15 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import { threadEnvironment } from "../../state/threads";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import {
+  kelxrCompactionCapability,
+  withKelxrCompactionTokenLimit,
+  type KelxrCompactionTokenLimit,
+} from "@t3tools/shared/kelxrCompactionPolicy";
+import { ContextControl } from "~/kelxr/ContextControl";
+import { useCompactionLimitStore } from "~/kelxr/compactionLimitStore";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
@@ -1078,6 +1087,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  providerDriver: string;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
@@ -1155,7 +1165,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-            {runtimeModeOptions.map((mode) => {
+            {runtimeModeOptionsForProvider(props.providerDriver).map((mode) => {
               const option = runtimeModeConfig[mode];
               const OptionIcon = option.icon;
               return (
@@ -1212,10 +1222,13 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onCompactContext?: (() => void) | undefined;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
+  compactionControl?: ReactNode;
 }) {
   return (
     <>
-      {props.activeContextWindow ? (
+      {props.compactionControl ? (
+        props.compactionControl
+      ) : props.activeContextWindow ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           modelDisplayName={props.activeThreadModelDisplayName}
@@ -2045,9 +2058,46 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     provider: selectedProviderStatus,
     interactionMode: requestedInteractionMode,
   });
+  // KelXR: the per-thread compaction threshold travels as a model option (kelxrCompactionPolicy).
+  const compactionThreadKey = scopedThreadKey(routeThreadRef);
+  const compactionTokenLimit = useCompactionLimitStore(
+    (state) => state.byThreadKey[compactionThreadKey] ?? null,
+  );
+  const setCompactionTokenLimit = useCompactionLimitStore((state) => state.setLimit);
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, { reportFailure: false });
   const selectedModelSelection = useMemo<ModelSelection>(
-    () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
-    [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
+    () =>
+      withKelxrCompactionTokenLimit(
+        createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
+        selectedProvider,
+        compactionTokenLimit,
+      ),
+    [
+      selectedInstanceId,
+      selectedModel,
+      selectedModelOptionsForDispatch,
+      selectedProvider,
+      compactionTokenLimit,
+    ],
+  );
+  const handleCompactionTokenLimitChange = useCallback(
+    (tokenLimit: KelxrCompactionTokenLimit | null) => {
+      setCompactionTokenLimit(compactionThreadKey, tokenLimit);
+      // Codex fixes the threshold when it opens the thread, so an idle session is stopped and the
+      // next message resumes the same thread with the new threshold.
+      if (selectedProvider === "codex" && activeThread?.session && phase === "ready") {
+        void stopThreadSession({ environmentId, input: { threadId: activeThread.id } });
+      }
+    },
+    [
+      activeThread,
+      compactionThreadKey,
+      environmentId,
+      phase,
+      selectedProvider,
+      setCompactionTokenLimit,
+      stopThreadSession,
+    ],
   );
   const selectedModelForPicker = selectedModel;
   // Instance-keyed option list so the picker can show each configured
@@ -4981,6 +5031,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           showInteractionModeToggle={planModeUiEnabled}
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}
+          providerDriver={selectedProvider}
           size={composerControlsInStrip ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
@@ -7044,6 +7095,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     compactDisabledReason={resolvedCompactDisabledReason}
                     {...(compactCommandAvailable ? { onCompactContext: compactThreadContext } : {})}
+                    compactionControl={
+                      kelxrCompactionCapability(selectedProvider) === "configurable" ? (
+                        <ContextControl
+                          capability="configurable"
+                          tokenLimit={compactionTokenLimit}
+                          usage={activeContextWindow}
+                          modelName={activeThreadModelDisplayName ?? selectedModel}
+                          modelCapacity={null}
+                          providerName={selectedProvider}
+                          thresholdNote={
+                            selectedProvider === "codex"
+                              ? "Applies on the next message. Codex compacts at this threshold, including during a turn."
+                              : "Applies on the next message. T3 compacts before sending if context exceeds the threshold."
+                          }
+                          changeDisabledReason={
+                            phase === "running"
+                              ? "Wait for the turn to finish before changing the threshold."
+                              : null
+                          }
+                          onChange={handleCompactionTokenLimitChange}
+                          onCompact={compactCommandAvailable ? compactThreadContext : undefined}
+                          compactDisabled={
+                            compactDisabled || noProviderAvailable || isSendBusy || isConnecting
+                          }
+                          compactDisabledReason={resolvedCompactDisabledReason}
+                        />
+                      ) : undefined
+                    }
                   />
                 </div>
               </div>

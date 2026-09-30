@@ -355,6 +355,10 @@
       "types": "./src/codexAuthCallback.ts",
       "import": "./src/codexAuthCallback.ts"
     },
+    "./kelxrCompactionPolicy": {
+      "types": "./src/kelxrCompactionPolicy.ts",
+      "import": "./src/kelxrCompactionPolicy.ts"
+    },
     "./codexAuthHandoff": {
       "types": "./src/codexAuthHandoff.ts",
       "import": "./src/codexAuthHandoff.ts"

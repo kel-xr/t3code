@@ -1,0 +1,189 @@
+name: Windows stable releases
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-stable-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.release.outputs.ready }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      base: ${{ steps.release.outputs.base }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: stable
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETRY_FAILED: ${{ github.event_name == 'workflow_dispatch' }}
+        run: node scripts/fork-release.mjs check
+
+  build:
+    needs: check
+    if: needs.check.outputs.ready == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      commit: ${{ steps.integrate.outputs.commit }}
+    env:
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: stable
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Integrate stable upstream
+        id: integrate
+        env:
+          UPSTREAM_TAG: ${{ needs.check.outputs.tag }}
+        run: node scripts/fork-release.mjs integrate $env:UPSTREAM_TAG
+      - name: Reconcile integrated dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Focused source tests
+        shell: pwsh
+        run: |
+          Push-Location apps/server
+          pnpm exec vp test run src/provider/Layers/CodexSessionRuntime.test.ts src/provider/Layers/OpenCodeAdapter.test.ts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Pop-Location
+          Push-Location packages/shared
+          pnpm exec vp test run src/kelxrCompactionPolicy.test.ts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Pop-Location
+          Push-Location apps/desktop
+          pnpm exec vp test run src/updates/ src/electron/ElectronUpdater.test.ts
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Pop-Location
+      - name: Typecheck changed packages
+        run: pnpm exec vp run --filter @t3tools/contracts --filter @t3tools/shared --filter t3 --filter @t3tools/web --filter @t3tools/desktop typecheck
+      - name: Packaging tests
+        working-directory: scripts
+        run: pnpm exec vp test run build-desktop-artifact.test.ts
+      - name: Install MSVC Spectre libraries
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath=& $vswhere -products * -latest -property installationPath
+          $setup="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $process=Start-Process -FilePath $setup -ArgumentList 'modify','--installPath',"`"$installPath`"",'--add','Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre','--quiet','--norestart' -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -notin 0,3010) { throw "MSVC setup exited $($process.ExitCode)" }
+      - name: Build Windows installer
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 --build-version $env:VERSION --output-dir release --verbose
+      - name: Build earlier QA installer for update detection
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+        shell: pwsh
+        run: |
+          $previous="$env:VERSION-qa.0"
+          node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 --build-version $previous --output-dir qa-release --skip-build --verbose
+      - name: Verify installed app and native updater download
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: node scripts/fork-installed-test.mjs qa-release release "$env:RUNNER_TEMP/t3code-installed-test" $env:VERSION $env:GITHUB_REPOSITORY
+      - name: Verify signing state and checksum assets
+        shell: pwsh
+        run: |
+          $files=Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe','.blockmap','.yml' }
+          if (-not ($files | Where-Object Extension -eq '.exe')) { throw 'No installer' }
+          foreach ($file in ($files | Where-Object Extension -eq '.exe')) {
+            $signature=Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'NotSigned') { throw "Unexpected signing state: $($signature.Status)" }
+          }
+          $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content release/SHA256SUMS.txt
+          git bundle create candidate.bundle stable
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-release
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/*.yml
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-source
+          path: candidate.bundle
+          retention-days: 1
+      - name: Mark failed candidate for manual review
+        if: failure()
+        run: '"Review this run before retrying." | Set-Content failed-candidate.txt'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: failure()
+        with:
+          name: failed-${{ needs.check.outputs.tag }}-${{ needs.check.outputs.base }}
+          path: failed-candidate.txt
+          retention-days: 90
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: stable
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-release
+          path: release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: candidate-source
+      - name: Publish validated source and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          BASE: ${{ needs.check.outputs.base }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c SHA256SUMS.txt
+          cd ..
+          test "$(git rev-parse origin/stable)" = "$BASE"
+          git fetch candidate.bundle refs/heads/stable:refs/heads/candidate
+          test "$(git rev-parse candidate)" = "$COMMIT"
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-list -n 1 "$TAG")" = "$COMMIT"
+          else
+            git tag "$TAG" "$COMMIT"
+          fi
+          git push --atomic origin candidate:refs/heads/stable "refs/tags/$TAG"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --target "$COMMIT" --title "T3 Code $TAG (Windows)" --notes "Based on stable upstream $TAG with context/compaction controls and Codex Approve for me. Windows x64 installer is unsigned. Source tests, typechecks, installed launch, native update detection/download and silent installer upgrade passed. Native updater restart/install has not been exercised."
+          fi
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
