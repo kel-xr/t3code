@@ -44,7 +44,7 @@ if (process.argv[2] === "check") {
       (artifact) => !artifact.expired && artifact.name === `failed-${release.tag_name}-${base}`,
     );
   output({
-    ready: (!own || own.draft) && !blocked,
+    ready: process.env.VALIDATE_ONLY === "true" || ((!own || own.draft) && !blocked),
     tag: release.tag_name,
     version: release.tag_name.slice(1),
     base,

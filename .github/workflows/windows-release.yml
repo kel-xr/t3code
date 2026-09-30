@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Rebuild and test the current stable version without publishing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RETRY_FAILED: ${{ github.event_name == 'workflow_dispatch' }}
+          VALIDATE_ONLY: ${{ inputs.validate_only == true }}
         run: node scripts/fork-release.mjs check
 
   build:
@@ -45,6 +51,8 @@ jobs:
     env:
       T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ELECTRON_CACHE: ${{ runner.temp }}/electron-cache
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -54,11 +62,56 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
-      - name: Install locked dependencies
+      - name: Resolve cache toolchain
+        id: toolchain
         shell: pwsh
         run: |
           corepack enable
+          "node=$(node --version)" >> $env:GITHUB_OUTPUT
+          "pnpm=$(pnpm --version)" >> $env:GITHUB_OUTPUT
+          "store=$(pnpm store path)" >> $env:GITHUB_OUTPUT
+          "rust=$(rustc --version)" >> $env:GITHUB_OUTPUT
+      - name: Cache pnpm store
+        id: pnpm-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.toolchain.outputs.store }}
+          key: pnpm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.node }}-${{ steps.toolchain.outputs.pnpm }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json') }}
+          restore-keys: |
+            pnpm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.node }}-${{ steps.toolchain.outputs.pnpm }}-
+      - name: Cache Electron and builder downloads
+        id: electron-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: electron-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml') }}
+          restore-keys: |
+            electron-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Cargo source downloads
+        id: cargo-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rust }}-${{ hashFiles('native/**/Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.rust }}-
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
           pnpm install --frozen-lockfile
+      - name: Report cache reuse
+        shell: pwsh
+        run: |
+          "pnpm cache-hit: ${{ steps.pnpm-cache.outputs.cache-hit == 'true' }}" >> $env:GITHUB_STEP_SUMMARY
+          "Electron/builder cache-hit: ${{ steps.electron-cache.outputs.cache-hit == 'true' }}" >> $env:GITHUB_STEP_SUMMARY
+          "Cargo downloads cache-hit: ${{ steps.cargo-cache.outputs.cache-hit == 'true' }}" >> $env:GITHUB_STEP_SUMMARY
       - name: Integrate stable upstream
         id: integrate
         env:
@@ -82,7 +135,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Pop-Location
       - name: Typecheck changed packages
-        run: pnpm exec vp run --filter @t3tools/contracts --filter @t3tools/shared --filter t3 --filter @t3tools/web --filter @t3tools/desktop typecheck
+        run: pnpm exec vp run --filter @t3tools/contracts --filter @t3tools/shared --filter t3 --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/scripts typecheck
       - name: Packaging tests
         working-directory: scripts
         run: pnpm exec vp test run build-desktop-artifact.test.ts
@@ -147,6 +200,7 @@ jobs:
 
   publish:
     needs: [check, build]
+    if: inputs.validate_only != true
     runs-on: ubuntu-latest
     permissions:
       contents: write

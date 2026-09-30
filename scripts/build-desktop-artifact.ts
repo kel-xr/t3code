@@ -941,6 +941,19 @@ interface StagePackageJson {
 }
 
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
+// Invoke the locked CLI directly: Windows .cmd shims can stop resolving when
+// packaging switches from the workspace to an isolated staging directory.
+export const resolveVitePlusCommand = Effect.fn("resolveVitePlusCommand")(function* (
+  args: ReadonlyArray<string>,
+) {
+  const path = yield* Path.Path;
+  const manifest = NodeModule.createRequire(import.meta.url).resolve("vite-plus/package.json");
+  return {
+    command: process.execPath,
+    args: [path.join(path.dirname(manifest), "bin", "vp"), ...args],
+    shell: false,
+  };
+});
 export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
 export const DESKTOP_FILE_EXCLUSIONS = [
   // T3 Code always passes the user's installed Claude executable to the SDK,
@@ -2965,7 +2978,7 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   }
 
   yield* Effect.log("[desktop-artifact] Installing server sidecar runtime externals...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand = yield* resolveVitePlusCommand([...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: serverStageDir,
@@ -3445,7 +3458,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
+    const spawnCommand = yield* resolveVitePlusCommand(["run", "build:desktop"]);
     yield* runCommand(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: repoRoot,
@@ -3719,7 +3732,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand = yield* resolveVitePlusCommand([...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: stageAppDir,
@@ -3819,7 +3832,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     "--publish",
     "never",
   ];
-  const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
+  const builderCommand = yield* resolveVitePlusCommand(builderArgs);
   yield* runCommand(
     ChildProcess.make(builderCommand.command, builderCommand.args, {
       cwd: repoRoot,

@@ -68,6 +68,7 @@ import {
   stageWslRuntimeArchive,
   bundlesWslRuntime,
   STAGE_INSTALL_ARGS,
+  resolveVitePlusCommand,
   ancestorNodeModulesPaths,
   copyDirectoryPreservingSymlinks,
   LinuxBrowserSecretHostError,
@@ -93,6 +94,19 @@ import {
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+
+it.effect("runs the locked Vite Plus CLI from an isolated staging directory", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-vp-stage-" });
+    const command = yield* resolveVitePlusCommand(["--version"]);
+    const child = yield* spawner.spawn(
+      ChildProcess.make(command.command, command.args, { cwd, shell: command.shell }),
+    );
+    assert.equal(Number(yield* child.exitCode), 0);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 // A minimal stand-in for the Linux CLI release archive: one top-level
 // directory named after the archive stem holding the executable, the web
