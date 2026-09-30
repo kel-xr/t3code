@@ -66,6 +66,7 @@ jobs:
         run: |
           corepack enable
           "ELECTRON_CACHE=$env:RUNNER_TEMP/electron-cache" >> $env:GITHUB_ENV
+          "electron_config_cache=$env:RUNNER_TEMP/electron-cache" >> $env:GITHUB_ENV
           "ELECTRON_BUILDER_CACHE=$env:RUNNER_TEMP/electron-builder-cache" >> $env:GITHUB_ENV
           "node=$(node --version)" >> $env:GITHUB_OUTPUT
           "pnpm=$(pnpm --version)" >> $env:GITHUB_OUTPUT
@@ -166,7 +167,7 @@ jobs:
       - name: Verify signing state and checksum assets
         shell: pwsh
         run: |
-          $files=Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe','.blockmap','.yml' }
+          $files=Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe','.blockmap' -or $_.Name -eq 'latest.yml' }
           if (-not ($files | Where-Object Extension -eq '.exe')) { throw 'No installer' }
           foreach ($file in ($files | Where-Object Extension -eq '.exe')) {
             $signature=Get-AuthenticodeSignature $file.FullName
@@ -180,7 +181,7 @@ jobs:
           path: |
             release/*.exe
             release/*.blockmap
-            release/*.yml
+            release/latest.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
